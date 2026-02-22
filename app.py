@@ -3,6 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 
+# --- NOWE IMPORTY DLA PLOTLY ---
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
 from core.fabrik_engine import fabrik, compute_angles
 from core.prime_utils import is_prime
 from curves.ulam import ulam_coordinates
@@ -17,7 +21,15 @@ st.set_page_config(layout="wide")
 
 st.title("🔵 FABRIK – odcisk palca liczb pierwszych na spirali Ulama")
 
-mode = st.sidebar.radio("Tryb pracy:", ["Obliczenia (tabela + wykresy)", "Animacja"])
+# --- ZMIANA: dodajemy nową opcję animacji ---
+mode = st.sidebar.radio(
+    "Tryb pracy:",
+    [
+        "Obliczenia (tabela + wykresy)",
+        "Animacja (matplotlib – wolna)",
+        "Animacja (Plotly – szybka)"
+    ]
+)
 
 n_min = st.sidebar.number_input("n min", value=2)
 n_max = st.sidebar.number_input("n max", value=200)
@@ -26,10 +38,11 @@ R = 1.0
 L = 2.0
 max_iters = st.sidebar.slider("Iteracje FABRIK", 10, 200, 50)
 
-if mode == "Animacja":
+if mode == "Animacja (matplotlib – wolna)":
     anim_speed = st.sidebar.slider("Prędkość animacji", 0.01, 1.0, 0.1)
 
 start = st.sidebar.button("▶️ Start")
+
 
 # ------------------ TRYB OBLICZENIA ------------------
 
@@ -220,9 +233,9 @@ if start and mode.startswith("Obliczenia"):
             st.pyplot(plot_fft_single(freqs, mags, "FFT ΔK3 – złożone"))
 
 
-# ------------------ TRYB ANIMACJA ------------------
+# ------------------ TRYB ANIMACJA MATPLOTLIB (TWÓJ ORYGINAŁ) ------------------
 
-if start and mode == "Animacja":
+if start and mode == "Animacja (matplotlib – wolna)":
 
     plot_area = st.empty()
 
@@ -273,3 +286,155 @@ if start and mode == "Animacja":
         plot_area.pyplot(fig)
 
         time.sleep(anim_speed)
+
+
+# ------------------ NOWA ANIMACJA PLOTLY – SZYBKA ------------------
+
+if start and mode == "Animacja (Plotly – szybka)":
+
+    st.subheader("⏳ Proszę czekać… generuję animację (może to potrwać kilka sekund)")
+
+    # Przygotowanie spirali Ulama
+    spiral_x = []
+    spiral_y = []
+    spiral_color = []
+
+    for m in range(int(n_min), int(n_max) + 1):
+        x_m, y_m = ulam_coordinates(m)
+        spiral_x.append(x_m)
+        spiral_y.append(y_m)
+        spiral_color.append("green" if is_prime(m) else "gray")
+
+    # Najpierw ustalamy MAKSYMALNĄ liczbę segmentów (k) w całym zakresie,
+    # żeby każda klatka miała tyle samo trace’ów z okręgami.
+    max_k = 0
+    for n in range(int(n_min), int(n_max) + 1):
+        x, y = ulam_coordinates(n)
+        dist = np.sqrt(x * x + y * y)
+        k = int(np.ceil(dist / L))
+        if k > max_k:
+            max_k = k
+
+    max_centers = max_k + 1  # bo centers ma k+1 punktów (łącznie z początkiem)
+
+    frames = []
+    theta = np.linspace(0, 2 * np.pi, 60)
+
+    for n in range(int(n_min), int(n_max) + 1):
+        x, y = ulam_coordinates(n)
+        target = np.array([x, y])
+
+        dist = np.sqrt(x * x + y * y)
+        k = int(np.ceil(dist / L))
+
+        centers = [np.array([0.0, 0.0])]
+        for _ in range(k):
+            centers.append(centers[-1] + np.array([L, 0]))
+
+        centers = fabrik(centers, target, L, R, max_iters=max_iters)
+
+        seg_x = [c[0] for c in centers]
+        seg_y = [c[1] for c in centers]
+
+        # Koła wokół segmentów – STAŁA liczba trace’ów = max_centers
+        circle_traces = []
+        for idx in range(max_centers):
+            if idx < len(centers):
+                cx = centers[idx][0]
+                cy = centers[idx][1]
+                circle_traces.append(
+                    go.Scatter(
+                        x=cx + R * np.cos(theta),
+                        y=cy + R * np.sin(theta),
+                        mode="lines",
+                        line=dict(color="blue", width=1),
+                        showlegend=False
+                    )
+                )
+            else:
+                # „Pusty” okrąg – niewidoczny, ale trace istnieje
+                circle_traces.append(
+                    go.Scatter(
+                        x=[np.nan],
+                        y=[np.nan],
+                        mode="lines",
+                        line=dict(color="blue", width=1),
+                        showlegend=False
+                    )
+                )
+
+        frame_data = [
+            go.Scatter(
+                x=spiral_x,
+                y=spiral_y,
+                mode="markers",
+                marker=dict(color=spiral_color, size=6),
+                name="Spirala"
+            ),
+            go.Scatter(
+                x=[x],
+                y=[y],
+                mode="markers",
+                marker=dict(color="red", size=12),
+                name="Cel"
+            ),
+            go.Scatter(
+                x=seg_x,
+                y=seg_y,
+                mode="lines+markers",
+                line=dict(color="black", width=3),
+                marker=dict(size=8),
+                name="Smok"
+            )
+        ] + circle_traces
+
+        frames.append(go.Frame(data=frame_data, name=str(n)))
+
+    fig = go.Figure(
+        data=frames[0].data,
+        frames=frames
+    )
+
+    fig.update_layout(
+        width=800,
+        height=800,
+        title="Animacja FABRIK na spirali Ulama (Plotly – szybka)",
+        xaxis=dict(scaleanchor="y", showgrid=True),
+        yaxis=dict(showgrid=True),
+        updatemenus=[
+            dict(
+                type="buttons",
+                showactive=True,
+                buttons=[
+                    dict(
+                        label="▶ Start",
+                        method="animate",
+                        args=[None, {"frame": {"duration": 200, "redraw": True},
+                                    "fromcurrent": True}]
+                    ),
+                    dict(
+                        label="⏸ Stop",
+                        method="animate",
+                        args=[[None], {"frame": {"duration": 0}, "mode": "immediate"}]
+                    )
+                ]
+            )
+        ],
+
+        sliders=[
+            dict(
+                steps=[
+                    dict(
+                        method="animate",
+                        args=[[str(n)], {"frame": {"duration": 0, "redraw": True}}],
+                        label=str(n)
+                    )
+                    for n in range(int(n_min), int(n_max) + 1)
+                ],
+                currentvalue={"prefix": "n = "}
+            )
+        ]
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
