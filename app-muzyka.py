@@ -1,0 +1,345 @@
+import os
+import math
+import threading
+import numpy as np
+import matplotlib.pyplot as plt
+import streamlit as st
+import time
+
+# ============================================================
+# ------------------ AUDIO: FLUIDSYNTH ------------------------
+# ============================================================
+
+if hasattr(os, "add_dll_directory"):
+    try:
+        os.add_dll_directory(r"C:\tools\fluidsynth\bin")
+    except FileNotFoundError:
+        pass
+
+import fluidsynth
+
+SOUNDFONT_PATH = r"C:\Users\Marek\Desktop\Liczby pierwsze\FluidR3_GM.sf2"
+
+
+def init_synth():
+    fs = fluidsynth.Synth()
+
+    try:
+        fs.start(driver="dsound")
+    except Exception:
+        drivers = fluidsynth.list_audio_drivers()
+        if not drivers:
+            raise RuntimeError("Brak dostępnych driverów audio Fluidsynth.")
+        fs.start(driver=drivers[0])
+
+    if not os.path.exists(SOUNDFONT_PATH):
+        st.error(f"Soundfont nie istnieje: {SOUNDFONT_PATH}")
+        return None, None
+
+    sfid = fs.sfload(SOUNDFONT_PATH)
+    fs.program_select(0, sfid, 0, 0)
+    return fs, sfid
+
+
+if "fs" not in st.session_state:
+    try:
+        fs, sfid = init_synth()
+        st.session_state.fs = fs
+        st.session_state.sfid = sfid
+    except Exception as e:
+        st.error(f"Nie udało się zainicjalizować syntezatora: {e}")
+        st.session_state.fs = None
+        st.session_state.sfid = None
+
+fs = st.session_state.fs
+sfid = st.session_state.sfid
+
+
+def play_note(pitch, velocity=100, duration=0.3, channel=0):
+    if fs is None:
+        return
+
+    if pitch is None or (isinstance(pitch, float) and math.isnan(pitch)):
+        return
+
+    pitch = int(np.clip(pitch, 0, 127))
+    velocity = int(np.clip(velocity, 0, 127))
+
+    fs.noteon(channel, pitch, velocity)
+    threading.Timer(duration, lambda: fs.noteoff(channel, pitch)).start()
+
+
+def safe(x):
+    if x is None:
+        return 0
+    if isinstance(x, float) and math.isnan(x):
+        return 0
+    return x
+
+
+def play_dragon_sound(n, centers, music_style):
+    if fs is None or sfid is None:
+        return
+
+    if len(centers) >= 2:
+        d_vec = centers[-1] - centers[-2]
+        energy = float(np.linalg.norm(d_vec))
+    else:
+        energy = 0.0
+
+    if math.isnan(energy):
+        energy = 0
+
+    base_pitch = 60
+
+    if music_style == "Prime Chimes":
+        if is_prime(n):
+            fs.program_select(0, sfid, 0, 112)
+            play_note(90, 120, 0.15)
+        else:
+            fs.program_select(0, sfid, 0, 13)
+            play_note(base_pitch + int(energy * 3), 80, 0.12)
+
+    elif music_style == "Polyphonic Serpent":
+        try:
+            angles = compute_angles(centers)
+            a1 = safe(float(angles[0]))
+            a2 = safe(float(angles[1])) if len(angles) > 1 else 0
+            a3 = safe(float(angles[2])) if len(angles) > 2 else 0
+        except Exception:
+            a1 = a2 = a3 = 0
+
+        fs.program_select(0, sfid, 0, 48)
+        play_note(base_pitch + int(a1 * 5), 90, 0.25)
+        play_note(base_pitch + 5 + int(a2 * 5), 80, 0.25)
+        play_note(base_pitch + 10 + int(a3 * 5), 70, 0.25)
+
+    elif music_style == "Prime Pulse":
+        fs.program_select(9, sfid, 128, 0)
+        if is_prime(n):
+            play_note(60, 120, 0.1, channel=9)
+            play_note(76, 100, 0.1, channel=9)
+        else:
+            if energy > 0.5:
+                play_note(60, 80, 0.08, channel=9)
+
+    elif music_style == "Cosmic Harmonics":
+        fs.program_select(0, sfid, 0, 89)
+
+        v_low = abs(np.sin(n * 0.07))
+        v_mid = abs(np.sin(n * 0.11))
+        v_high = abs(np.sin(n * 0.17))
+
+        play_note(40 + int(v_low * 12), 70, 0.6)
+        play_note(52 + int(v_mid * 12), 80, 0.6)
+        play_note(64 + int(v_high * 12), 90, 0.6)
+
+
+# ============================================================
+# ------------------ TWÓJ KOD FABRIK + ANALIZA ----------------
+# ============================================================
+
+from core.fabrik_engine import fabrik, compute_angles
+from core.prime_utils import is_prime
+from curves.ulam import ulam_coordinates
+
+from analysis.angles import build_angles_df, plot_angles
+from analysis.delta_angles import compute_delta, plot_delta
+from analysis.fft_analysis import extract_real_signal, compute_fft_signal, plot_fft_single
+from analysis.heatmap import plot_heatmap
+
+
+# ============================================================
+# ------------------ STREAMLIT UI -----------------------------
+# ============================================================
+
+st.set_page_config(layout="wide")
+st.title("🔵 FABRIK – odcisk palca liczb pierwszych na spirali Ulama")
+
+mode = st.sidebar.radio("Tryb pracy:", ["Obliczenia (tabela + wykresy)", "Animacja"])
+
+n_min = st.sidebar.number_input("n min", value=2)
+n_max = st.sidebar.number_input("n max", value=200)
+
+R = 1.0
+L = 2.0
+max_iters = st.sidebar.slider("Iteracje FABRIK", 10, 200, 50)
+
+music_style = None
+if mode == "Animacja":
+    music_style = st.sidebar.selectbox(
+        "Styl muzyki smoka:",
+        ["Prime Chimes", "Polyphonic Serpent", "Prime Pulse", "Cosmic Harmonics"],
+        index=0,
+    )
+    anim_speed = st.sidebar.slider("Prędkość animacji", 0.01, 1.0, 0.1)
+
+start = st.sidebar.button("▶️ Start")
+
+
+# ============================================================
+# ------------------ TRYB OBLICZENIA --------------------------
+# ============================================================
+
+if start and mode.startswith("Obliczenia"):
+    df = build_angles_df(
+        n_min=n_min,
+        n_max=n_max,
+        ulam_coordinates=ulam_coordinates,
+        fabrik=fabrik,
+        compute_angles=compute_angles,
+        L=L,
+        R=R,
+        max_iters=max_iters,
+        is_prime=is_prime,
+    )
+
+    st.subheader("📄 Tabela kątów")
+    st.dataframe(df, use_container_width=True)
+
+    angle_cols = [c for c in df.columns if c.startswith("K")][:3]
+
+    primes_df = df[df["prime"] == True]
+    comp_df = df[df["prime"] == False]
+
+    st.subheader("📈 Wykresy kątów K1, K2, K3")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.pyplot(plot_angles(df, angle_cols, "Wszystkie liczby"))
+    with c2:
+        if len(primes_df) > 0:
+            st.pyplot(plot_angles(primes_df, angle_cols, "Liczby pierwsze"))
+        else:
+            st.write("Brak liczb pierwszych.")
+    with c3:
+        if len(comp_df) > 0:
+            st.pyplot(plot_angles(comp_df, angle_cols, "Liczby złożone"))
+        else:
+            st.write("Brak liczb złożonych.")
+
+    st.subheader("📄 Tabela różnic kątów ΔK")
+    delta_df = compute_delta(df, angle_cols)
+    st.dataframe(delta_df, use_container_width=True)
+
+    primes_delta = delta_df[delta_df["prime"] == True]
+    comp_delta = delta_df[delta_df["prime"] == False]
+
+    st.subheader("📈 Wykresy różnic kątów ΔK1, ΔK2, ΔK3")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.pyplot(plot_delta(delta_df, angle_cols, "ΔK – wszystkie"))
+    with d2:
+        if len(primes_delta) > 0:
+            st.pyplot(plot_delta(primes_delta, angle_cols, "ΔK – pierwsze"))
+        else:
+            st.write("Brak liczb pierwszych.")
+    with d3:
+        if len(comp_delta) > 0:
+            st.pyplot(plot_delta(comp_delta, angle_cols, "ΔK – złożone"))
+        else:
+            st.write("Brak liczb złożonych.")
+
+    st.subheader("🔥 Heatmapa kątów K1–K3")
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        st.pyplot(plot_heatmap(df, angle_cols, "Heatmapa K – wszystkie"))
+    with h2:
+        if len(primes_df) > 0:
+            st.pyplot(plot_heatmap(primes_df, angle_cols, "Heatmapa K – pierwsze"))
+        else:
+            st.write("Brak liczb pierwszych.")
+    with h3:
+        if len(comp_df) > 0:
+            st.pyplot(plot_heatmap(comp_df, angle_cols, "Heatmapa K – złożone"))
+        else:
+            st.write("Brak liczb złożonych.")
+
+    st.subheader("🔥 Heatmapa różnic kątów ΔK1–ΔK3")
+    hd1, hd2, hd3 = st.columns(3)
+    with hd1:
+        st.pyplot(plot_heatmap(delta_df, angle_cols, "Heatmapa ΔK – wszystkie"))
+    with hd2:
+        if len(primes_delta) > 0:
+            st.pyplot(plot_heatmap(primes_delta, angle_cols, "Heatmapa ΔK – pierwsze"))
+        else:
+            st.write("Brak liczb pierwszych.")
+    with hd3:
+        if len(comp_delta) > 0:
+            st.pyplot(plot_heatmap(comp_delta, angle_cols, "Heatmapa ΔK – złożone"))
+        else:
+            st.write("Brak liczb złożonych.")
+
+    st.subheader("📈 FFT kątów (K1, K2, K3)")
+    fk1, fk2, fk3 = st.columns(3)
+    with fk1:
+        sig_all = extract_real_signal(df, angle_cols[0])
+        freqs, mags = compute_fft_signal(sig_all)
+        st.pyplot(plot_fft_single(freqs, mags, "FFT K1 – wszystkie"))
+    with fk2:
+        sig_all = extract_real_signal(df, angle_cols[1])
+        freqs, mags = compute_fft_signal(sig_all)
+        st.pyplot(plot_fft_single(freqs, mags, "FFT K2 – wszystkie"))
+    with fk3:
+        sig_all = extract_real_signal(df, angle_cols[2])
+        freqs, mags = compute_fft_signal(sig_all)
+        st.pyplot(plot_fft_single(freqs, mags, "FFT K3 – wszystkie"))
+
+
+# ============================================================
+# ------------------ TRYB ANIMACJA ----------------------------
+# ============================================================
+
+if start and mode == "Animacja":
+
+    plot_area = st.empty()
+
+    spiral_x = []
+    spiral_y = []
+    spiral_color = []
+
+    for m in range(int(n_min), int(n_max) + 1):
+        x_m, y_m = ulam_coordinates(m)
+        spiral_x.append(x_m)
+        spiral_y.append(y_m)
+        spiral_color.append("green" if is_prime(m) else "gray")
+
+    for n in range(int(n_min), int(n_max) + 1):
+        x, y = ulam_coordinates(n)
+        target = np.array([x, y])
+
+        dist = np.sqrt(x * x + y * y)
+        k = int(np.ceil(dist / L))
+
+        centers = [np.array([0.0, 0.0])]
+        for _ in range(k):
+            centers.append(centers[-1] + np.array([L, 0]))
+
+        centers = fabrik(centers, target, L, R, max_iters=max_iters)
+
+        if music_style:
+            play_dragon_sound(n, centers, music_style)
+
+        fig, ax = plt.subplots(figsize=(6, 6))  # <<< MNIEJSZY WYKRES
+
+        ax.scatter(spiral_x, spiral_y, c=spiral_color, s=30, alpha=0.6)
+        ax.scatter([x], [y], color="red", s=200)
+
+        for i in range(len(centers) - 1):
+            ax.plot(
+                [centers[i][0], centers[i+1][0]],
+                [centers[i][1], centers[i+1][1]],
+                "k-",
+                linewidth=2,
+            )
+
+        for c in centers:
+            circ = plt.Circle((c[0], c[1]), R, fill=False, color="blue")
+            ax.add_patch(circ)
+
+        ax.set_title(f"n = {n}   prime = {is_prime(n)}   target = ({x}, {y})")
+        ax.set_aspect("equal")
+        ax.grid(True)
+
+        plot_area.pyplot(fig, use_container_width=False)  # <<< NIE ROZCIĄGAJ
+
+        time.sleep(anim_speed)
